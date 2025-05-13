@@ -1,0 +1,1123 @@
+#!/usr/bin/env python
+"""
+Options Trading Dashboard
+
+A Streamlit-based dashboard for the options day trading system.
+Allows users to scan for trading opportunities, simulate trades,
+and track performance.
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import datetime
+import time
+import os
+from typing import Dict, List, Tuple, Optional
+
+# Import our trading systems
+from options_day_trader_sim import OptionsDayTrader, OptionSignal, Config, MarketDataSimulator
+from smart_trader import SmartTrader
+from realistic_options_sim import RealisticOptionsDayTrader
+from realistic_smart_trader import RealisticSmartTrader
+
+# Import Alpaca integration
+from alpaca_market_data import AlpacaMarketData
+from integrate_alpaca import AlpacaIntegration
+
+# Import API credentials
+from alpaca_config import ALPACA_API_KEY, ALPACA_API_SECRET, ALPACA_API_BASE_URL
+
+# Set page configuration
+st.set_page_config(
+    page_title="Options Day Trading Dashboard",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Initialize session state variables if they don't exist
+if 'account_value' not in st.session_state:
+    st.session_state.account_value = 25000.0
+if 'trade_history' not in st.session_state:
+    st.session_state.trade_history = []
+if 'signals' not in st.session_state:
+    st.session_state.signals = []
+if 'trader' not in st.session_state:
+    st.session_state.trader = OptionsDayTrader(account_value=st.session_state.account_value)
+if 'smart_trader' not in st.session_state:
+    st.session_state.smart_trader = SmartTrader(account_value=st.session_state.account_value)
+if 'realistic_trader' not in st.session_state:
+    st.session_state.realistic_trader = RealisticOptionsDayTrader(account_value=st.session_state.account_value)
+if 'realistic_smart_trader' not in st.session_state:
+    st.session_state.realistic_smart_trader = RealisticSmartTrader(account_value=st.session_state.account_value)
+# Add continuous account history tracking
+if 'account_history' not in st.session_state:
+    st.session_state.account_history = [{'timestamp': datetime.datetime.now(), 'value': st.session_state.account_value, 'label': 'Initial Balance'}]
+if 'last_reset_value' not in st.session_state:
+    st.session_state.last_reset_value = st.session_state.account_value
+
+# Sidebar - Configuration Options
+st.sidebar.title("Options Trading Dashboard")
+st.sidebar.image("https://static.vecteezy.com/system/resources/previews/021/608/790/original/stock-market-trade-logo-market-trade-logo-template-design-vector.jpg", width=100)
+
+# Trading System Selection
+trading_system = st.sidebar.selectbox(
+    "Select Trading System",
+    ["Day Trader", "Smart Trader (ML)"]
+)
+
+# Data source selection
+data_source = st.sidebar.selectbox(
+    "Data Source",
+    ["Simulated", "Alpaca Real-Time", "Market Data API"],
+    index=0,
+    help="Select where to get market data from"
+)
+
+# Set the data source in environment variable to control which pattern files to use
+os.environ["TRADING_DATA_SOURCE"] = data_source
+
+# Add reset button for learning data when switching data sources
+if 'prev_data_source' not in st.session_state:
+    st.session_state.prev_data_source = data_source
+
+# If data source changed, suggest resetting learning data
+if st.session_state.prev_data_source != data_source:
+    st.sidebar.warning(f"⚠️ Data source changed from {st.session_state.prev_data_source} to {data_source}. You must reset learning data.")
+    
+    if st.sidebar.button("Reset Learning Data", key="reset_button", type="primary"):
+        try:
+            # Import reset function
+            from reset_learning_data import reset_learning_data
+            
+            # Perform reset
+            reset_learning_data(data_source)
+            
+            # Reset traders in session state
+            st.session_state.smart_trader = SmartTrader(account_value=st.session_state.account_value)
+            st.session_state.realistic_smart_trader = RealisticSmartTrader(account_value=st.session_state.account_value)
+            
+            st.sidebar.success(f"✅ Learning data reset successfully for {data_source}. The system will learn new patterns.")
+        except Exception as e:
+            st.sidebar.error(f"❌ Error resetting learning data: {str(e)}")
+else:
+    # Still display a reset button when not switching, just less prominent
+    if st.sidebar.button("Reset Learning Data", key="reset_button_normal"):
+        try:
+            # Import reset function
+            from reset_learning_data import reset_learning_data
+            
+            # Perform reset
+            reset_learning_data(data_source)
+            
+            # Reset traders in session state
+            st.session_state.smart_trader = SmartTrader(account_value=st.session_state.account_value)
+            st.session_state.realistic_smart_trader = RealisticSmartTrader(account_value=st.session_state.account_value)
+            
+            st.sidebar.success(f"✅ Learning data reset successfully for {data_source}. The system will learn new patterns.")
+        except Exception as e:
+            st.sidebar.error(f"❌ Error resetting learning data: {str(e)}")
+
+# Update previous data source
+st.session_state.prev_data_source = data_source
+
+# Add note about current data source
+st.sidebar.write(f"📊 **Active Data Source:** {data_source}")
+
+# If Alpaca is selected, show Alpaca settings
+if data_source == "Alpaca Real-Time":
+    st.sidebar.subheader("Alpaca API Settings")
+    
+    # Use values from config file as defaults
+    alpaca_api_key = st.sidebar.text_input(
+        "API Key", 
+        value=ALPACA_API_KEY,
+        type="password"
+    )
+    
+    alpaca_api_secret = st.sidebar.text_input(
+        "API Secret",
+        value=ALPACA_API_SECRET,
+        type="password"
+    )
+    
+    alpaca_base_url = st.sidebar.text_input(
+        "API Base URL",
+        value=ALPACA_API_BASE_URL
+    )
+    
+    # Initialize Alpaca integration if not already done
+    if 'alpaca_integration' not in st.session_state or \
+       st.session_state.alpaca_api_key != alpaca_api_key or \
+       st.session_state.alpaca_api_secret != alpaca_api_secret or \
+       st.session_state.alpaca_base_url != alpaca_base_url:
+        
+        st.session_state.alpaca_api_key = alpaca_api_key
+        st.session_state.alpaca_api_secret = alpaca_api_secret
+        st.session_state.alpaca_base_url = alpaca_base_url
+        
+        # Create and store the Alpaca integration
+        try:
+            st.session_state.alpaca_integration = AlpacaIntegration(
+                api_key=alpaca_api_key,
+                api_secret=alpaca_api_secret,
+                base_url=alpaca_base_url
+            )
+            st.sidebar.success("✅ Connected to Alpaca API")
+        except Exception as e:
+            st.sidebar.error(f"❌ Error connecting to Alpaca: {str(e)}")
+            st.session_state.alpaca_integration = None
+
+# Add realistic simulation toggle
+use_realistic_simulation = st.sidebar.checkbox(
+    "Use Realistic Simulation", 
+    value=False, 
+    help="Enable realistic factors: slippage, detailed commissions, and fill probability"
+)
+
+# If realistic simulation is enabled, show additional options
+if use_realistic_simulation:
+    st.sidebar.subheader("Realistic Simulation Options")
+    order_type = st.sidebar.selectbox(
+        "Order Type",
+        ["limit", "market"],
+        index=0,
+        help="Limit orders allow price selection but may not fill. Market orders always fill but at worse prices."
+    )
+    
+    if order_type == "limit":
+        price_point = st.sidebar.selectbox(
+            "Price Point",
+            ["bid", "mid", "ask"],
+            index=1,
+            help="Bid (lowest fill chance, best price), Mid (medium), Ask (highest fill chance, worst price)"
+        )
+    else:
+        price_point = "ask"  # Market orders execute at ask
+
+# Account Management
+st.sidebar.subheader("Account Management")
+account_value = st.sidebar.number_input("Account Value", 
+                                        min_value=1000.0, 
+                                        max_value=1000000.0, 
+                                        value=st.session_state.account_value,
+                                        step=1000.0,
+                                        format="%.2f")
+
+if account_value != st.session_state.account_value:
+    # Detect if this is a manual reset
+    if account_value != st.session_state.last_reset_value:
+        # This is a reset - add a marker in the history
+        st.session_state.account_history.append({
+            'timestamp': datetime.datetime.now(),
+            'value': account_value,
+            'label': 'Manual Reset'
+        })
+        # Update the last reset value
+        st.session_state.last_reset_value = account_value
+        # Display a notification
+        st.sidebar.success(f"Account reset to ${account_value:.2f} - Balance history will start fresh.")
+    
+    # Update account value
+    st.session_state.account_value = account_value
+    if trading_system == "Day Trader":
+        st.session_state.trader = OptionsDayTrader(account_value=account_value)
+        st.session_state.realistic_trader = RealisticOptionsDayTrader(account_value=account_value)
+    else:
+        st.session_state.smart_trader = SmartTrader(account_value=account_value)
+        st.session_state.realistic_smart_trader = RealisticSmartTrader(account_value=account_value)
+
+# Risk Management Settings
+st.sidebar.subheader("Risk Management")
+position_size_pct = st.sidebar.slider("Position Size %", 1.0, 10.0, 10.0, 0.5) / 100
+stop_loss_pct = st.sidebar.slider("Stop Loss %", 5.0, 30.0, Config.STOP_LOSS_PCT * 100, 1.0) / 100
+profit_target_pct = st.sidebar.slider("Profit Target %", 5.0, 30.0, 20.0, 1.0) / 100
+
+# Trading Parameters
+st.sidebar.subheader("Trading Parameters")
+days_to_exp = st.sidebar.slider("Days to Expiration", 0, 5, 5, 1)
+max_hold_minutes = st.sidebar.slider("Max Hold Time (minutes)", 5, 120, 75, 5)
+
+# Update Config based on sidebar settings
+Config.POSITION_SIZE_PCT = position_size_pct
+Config.STOP_LOSS_PCT = stop_loss_pct
+Config.PROFIT_TARGET_PCT = profit_target_pct
+Config.DAYS_TO_EXPIRATION = days_to_exp
+Config.MAX_HOLD_MINUTES = max_hold_minutes
+
+# Symbols to track
+st.sidebar.subheader("Watchlist")
+default_symbols = ", ".join(Config.WATCHLIST)
+symbols_input = st.sidebar.text_input("Symbols (comma separated)", default_symbols)
+symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
+if symbols:
+    Config.WATCHLIST = symbols
+
+# Main Dashboard
+st.title("Options Day Trading Dashboard")
+
+# Tabs for different sections
+tab1, tab2, tab3, tab4 = st.tabs(["Market Scanner", "Trade Simulator", "Performance", "Learning System"])
+
+# Market Scanner Tab
+with tab1:
+    st.header("Market Scanner")
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        st.subheader("Trading Opportunities")
+        
+        if st.button("Scan for Trading Opportunities"):
+            with st.spinner("Scanning market..."):
+                if data_source == "Alpaca Real-Time" and 'alpaca_integration' in st.session_state and st.session_state.alpaca_integration:
+                    # Use Alpaca for real market data
+                    try:
+                        # Get signals from Alpaca
+                        st.session_state.signals = st.session_state.alpaca_integration.get_option_signals(symbols, max_signals=10)
+                        if not st.session_state.signals:
+                            st.warning("No trading signals found from Alpaca API. Try different symbols or check connection.")
+                    except Exception as e:
+                        st.error(f"Error getting signals from Alpaca: {str(e)}")
+                        st.session_state.signals = []
+                elif data_source == "Market Data API":
+                    # Use Market Data API for real options data
+                    try:
+                        # Import needed modules
+                        from integrate_market_data import MarketDataIntegration
+                        
+                        # Initialize the integration
+                        integration = MarketDataIntegration()
+                        
+                        # Get signals
+                        market_signals = integration.get_option_signals(symbols, max_signals=10)
+                        
+                        # Store in session state
+                        st.session_state.signals = market_signals
+                        
+                        if not st.session_state.signals:
+                            st.warning("No trading signals found from Market Data API. Try different symbols or check connection.")
+                    except Exception as e:
+                        st.error(f"Error getting signals from Market Data API: {str(e)}")
+                        st.session_state.signals = []
+                else:
+                    # Use simulated data
+                    if trading_system == "Day Trader":
+                        st.session_state.signals = st.session_state.trader.scan_for_signals()
+                    else:
+                        signals = st.session_state.smart_trader.scan_for_trades(symbols)
+                        # Convert to compatible format
+                        st.session_state.signals = []
+                        for signal_data in signals:
+                            # Create OptionSignal from SmartTrader output
+                            entry_low = signal_data["bid"]
+                            entry_high = min(signal_data["mid"] * 1.02, signal_data["ask"])
+                            signal = OptionSignal(
+                                symbol=signal_data["symbol"],
+                                option_type=signal_data["option_type"],
+                                strike=signal_data["strike"],
+                                expiration=signal_data["expiry"],
+                                current_price=signal_data["mid"],
+                                underlying_price=signal_data["price"],
+                                entry_price_range=(entry_low, entry_high),
+                                stop_loss=signal_data["mid"] * (1 - Config.STOP_LOSS_PCT),
+                                target_price=signal_data["mid"] * (1 + Config.PROFIT_TARGET_PCT),
+                                signal_strength=signal_data["score"],
+                                volume=signal_data.get("volume", 1000),
+                                open_interest=signal_data.get("open_interest", 5000),
+                                iv=signal_data.get("iv", 30.0),
+                                delta=signal_data.get("delta", 0.30)
+                            )
+                            st.session_state.signals.append(signal)
+        
+        if st.session_state.signals:
+            for i, signal in enumerate(st.session_state.signals):
+                with st.expander(f"{signal.symbol} {signal.option_type.upper()} ${signal.strike} - Score: {signal.signal_strength:.2f}"):
+                    st.write(f"**Underlying Price:** ${signal.underlying_price:.2f}")
+                    st.write(f"**Option Price:** ${signal.current_price:.2f}")
+                    st.write(f"**Entry Range:** ${signal.entry_price_range[0]:.2f} - ${signal.entry_price_range[1]:.2f}")
+                    st.write(f"**Stop Loss:** ${signal.stop_loss:.2f} (-{Config.STOP_LOSS_PCT*100:.1f}%)")
+                    st.write(f"**Target Price:** ${signal.target_price:.2f} (+{Config.PROFIT_TARGET_PCT*100:.1f}%)")
+                    st.write(f"**Expiration:** {signal.expiration}")
+                    
+                    # Check if these attributes exist before displaying them (for Market Data API signals)
+                    extra_info = []
+                    if hasattr(signal, 'volume'):
+                        extra_info.append(f"**Volume:** {signal.volume}")
+                    if hasattr(signal, 'open_interest'):
+                        extra_info.append(f"**Open Interest:** {signal.open_interest}")
+                    if hasattr(signal, 'iv'):
+                        extra_info.append(f"**IV:** {signal.iv:.1f}%")
+                    if hasattr(signal, 'delta'):
+                        extra_info.append(f"**Delta:** {signal.delta:.2f}")
+                    
+                    # Display extra info if available, otherwise display greeks
+                    if extra_info:
+                        st.write(" | ".join(extra_info))
+                    elif hasattr(signal, 'delta') and hasattr(signal, 'gamma') and hasattr(signal, 'theta') and hasattr(signal, 'vega'):
+                        st.write(f"**Greeks:** Delta {signal.delta:.2f}, Gamma {signal.gamma:.2f}, Theta {signal.theta:.2f}, Vega {signal.vega:.2f}")
+                    
+                    if st.button(f"Simulate Trade #{i+1}", key=f"sim_{i}"):
+                        with st.spinner("Simulating trade..."):
+                            if trading_system == "Day Trader":
+                                if use_realistic_simulation:
+                                    # Create RealisticOptionsDayTrader if not already created
+                                    if 'realistic_trader' not in st.session_state:
+                                        st.session_state.realistic_trader = RealisticOptionsDayTrader(
+                                            account_value=st.session_state.account_value
+                                        )
+                                    
+                                    # Use the realistic trader
+                                    trader = st.session_state.realistic_trader
+                                    result = trader.simulate_trade(
+                                        signal, 
+                                        order_type=order_type, 
+                                        price_point=price_point if order_type == "limit" else "ask"
+                                    )
+                                    
+                                    # Update session state only if the order filled
+                                    if result.get("filled", False):
+                                        st.session_state.trade_history.append(result)
+                                        st.session_state.account_value = result["new_account"]
+                                        # Record in continuous history 
+                                        st.session_state.account_history.append({
+                                            'timestamp': datetime.datetime.now(),
+                                            'value': result["new_account"],
+                                            'label': f"Trade: {result['symbol']} {result['option_type'].upper()}"
+                                        })
+                                        st.success(f"Trade simulated! {'Profit' if result['net_profit'] > 0 else 'Loss'}: ${result['net_profit']:.2f}")
+                                    else:
+                                        st.error(f"Order was not filled! Fill probability was only {result['fill_probability']:.1%}")
+                                else:
+                                    # Use the standard trader
+                                    result = st.session_state.trader.simulate_trade(signal)
+                                    st.session_state.trade_history.append(result)
+                                    st.session_state.account_value = result["new_account"]
+                                    # Record in continuous history 
+                                    st.session_state.account_history.append({
+                                        'timestamp': datetime.datetime.now(),
+                                        'value': result["new_account"],
+                                        'label': f"Trade: {result['symbol']} {result['option_type'].upper()}"
+                                    })
+                                    st.success(f"Trade simulated! {'Profit' if result['net_profit'] > 0 else 'Loss'}: ${result['net_profit']:.2f}")
+                            else:
+                                # Convert OptionSignal back to format expected by smart_trader
+                                trade_info = {
+                                    "symbol": signal.symbol,
+                                    "option_type": signal.option_type,
+                                    "strike": signal.strike,
+                                    "expiry": signal.expiration,
+                                    "price": signal.underlying_price,
+                                    "bid": signal.entry_price_range[0],
+                                    "ask": signal.entry_price_range[1],
+                                    "mid": signal.current_price,
+                                    "volume": getattr(signal, 'volume', 1000),  # Default to 1000 if not available
+                                    "open_interest": getattr(signal, 'open_interest', 5000),  # Default to 5000 if not available
+                                    "delta": getattr(signal, 'delta', 0.30),  # Default to 0.30 if not available
+                                    "iv": getattr(signal, 'iv', 30.0),  # Default to 30.0 if not available
+                                    "score": signal.signal_strength,
+                                    "rsi": 30 if signal.option_type == "call" else 70  # Simulate RSI
+                                }
+                                
+                                if use_realistic_simulation:
+                                    # Use the realistic smart trader
+                                    result = st.session_state.realistic_smart_trader.execute_trade(
+                                        trade_info,
+                                        order_type=order_type,
+                                        price_point=price_point if order_type == "limit" else "ask"
+                                    )
+                                    
+                                    # Update session state only if the order filled
+                                    if result.get("filled", False):
+                                        st.session_state.trade_history.append(result)
+                                        st.session_state.account_value = result["new_account"]
+                                        # Record in continuous history 
+                                        st.session_state.account_history.append({
+                                            'timestamp': datetime.datetime.now(),
+                                            'value': result["new_account"],
+                                            'label': f"Trade: {result['symbol']} {result['option_type'].upper()}"
+                                        })
+                                        st.success(f"Trade simulated! {'Profit' if result['net_profit'] > 0 else 'Loss'}: ${result['net_profit']:.2f}")
+                                    else:
+                                        st.error(f"Order was not filled! Fill probability was only {result['fill_probability']:.1%}")
+                                else:
+                                    # Use standard smart trader
+                                    result = st.session_state.smart_trader.execute_trade(trade_info)
+                                    st.session_state.trade_history.append(result)
+                                    st.session_state.account_value = result["new_account"]
+                                    # Record in continuous history 
+                                    st.session_state.account_history.append({
+                                        'timestamp': datetime.datetime.now(),
+                                        'value': result["new_account"],
+                                        'label': f"Trade: {result['symbol']} {result['option_type'].upper()}"
+                                    })
+                                    st.success(f"Trade simulated! {'Profit' if result['net_profit'] > 0 else 'Loss'}: ${result['net_profit']:.2f}")
+    
+    with col2:
+        st.subheader("Market Data")
+        
+        # Show current prices of symbols in watchlist
+        market_data = MarketDataSimulator()
+        
+        market_data_df = pd.DataFrame({
+            "Symbol": symbols,
+            "Price": [market_data.get_price(symbol) for symbol in symbols],
+            "Change %": [market_data.get_technical_indicators(symbol).get("price_change_1d", 0) * 100 for symbol in symbols],
+            "RSI": [market_data.get_technical_indicators(symbol).get("rsi", 50) for symbol in symbols]
+        })
+        
+        # Format and display market data
+        market_data_df["Price"] = market_data_df["Price"].map("${:.2f}".format)
+        market_data_df["Change %"] = market_data_df["Change %"].map("{:+.2f}%".format)
+        
+        # Color code RSI values
+        def color_rsi(val):
+            if val < 30:
+                return "background-color: green; color: white"
+            elif val > 70:
+                return "background-color: red; color: white"
+            return ""
+        
+        st.dataframe(market_data_df.style.applymap(color_rsi, subset=["RSI"]), height=400)
+
+# Trade Simulator Tab
+with tab2:
+    st.header("Trade Simulator")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Run Multiple Trade Simulations")
+        
+        num_trades = st.slider("Number of Trades", 5, 50, 10, 5)
+        num_sessions = st.slider("Number of Sessions", 1, 10, 3, 1)
+        
+        if st.button("Run Simulations"):
+            with st.spinner("Running trade simulations..."):
+                if trading_system == "Day Trader":
+                    # Use the trader to run multiple trades
+                    results = []
+                    starting_account = st.session_state.account_value
+                    
+                    progress_bar = st.progress(0)
+                    for i in range(num_trades):
+                        # Force find at least one signal
+                        signals = st.session_state.trader.scan_for_signals(force_symbol=symbols[0])
+                        if signals:
+                            result = st.session_state.trader.simulate_trade(signals[0])
+                            results.append(result)
+                            st.session_state.trade_history.append(result)
+                        progress_bar.progress((i + 1) / num_trades)
+                        time.sleep(0.1)  # Slow down a bit for visibility
+                    
+                    # Update account value
+                    st.session_state.account_value = st.session_state.trader.account_value
+                    
+                    # Show summary
+                    total_profit = sum(r["net_profit"] for r in results)
+                    win_count = sum(1 for r in results if r["net_profit"] > 0)
+                    win_rate = win_count / len(results) if results else 0
+                    
+                    st.success(f"Simulation complete! Win rate: {win_rate:.1%}, Total profit: ${total_profit:.2f}")
+                else:
+                    # Use the smart trader's built-in session runner
+                    starting_account = st.session_state.account_value
+                    
+                    if use_realistic_simulation:
+                        # Use realistic smart trader
+                        st.session_state.realistic_smart_trader.account_value = starting_account
+                        
+                        # Clear session trades
+                        st.session_state.realistic_smart_trader.current_session = []
+                        
+                        progress_bar = st.progress(0)
+                        trades_executed = 0
+                        attempt_count = 0
+                        max_attempts = num_trades * 3  # Allow more attempts for unfilled orders
+                        
+                        while trades_executed < num_trades and attempt_count < max_attempts:
+                            # Scan for opportunities
+                            opportunities = st.session_state.realistic_smart_trader.scan_for_trades(symbols)
+                            
+                            if opportunities:
+                                # Take the top opportunity
+                                trade_info = opportunities[0]
+                                
+                                # Execute with realistic factors
+                                result = st.session_state.realistic_smart_trader.execute_trade(
+                                    trade_info,
+                                    order_type=order_type,
+                                    price_point=price_point if order_type == "limit" else "ask"
+                                )
+                                
+                                # Only count filled orders toward completed trades
+                                if result.get("filled", False):
+                                    trades_executed += 1
+                                    progress_bar.progress(trades_executed / num_trades)
+                            
+                            attempt_count += 1
+                            time.sleep(0.1)  # Small delay
+                        
+                        # Update account value and trade history
+                        st.session_state.account_value = st.session_state.realistic_smart_trader.account_value
+                        st.session_state.trade_history.extend(st.session_state.realistic_smart_trader.current_session)
+                        
+                        # Calculate fill rate
+                        filled_trades = [t for t in st.session_state.realistic_smart_trader.current_session if t.get("filled", True)]
+                        fill_rate = len(filled_trades) / attempt_count if attempt_count > 0 else 0
+                        
+                        # Show summary with realistic metrics
+                        total_return = (st.session_state.account_value / starting_account - 1) * 100
+                        st.success(f"Simulation complete! Return: {total_return:+.2f}%, Fill rate: {fill_rate:.1%}")
+                    else:
+                        # Use standard smart trader
+                        st.session_state.smart_trader.run_multiple_sessions(
+                            num_sessions=num_sessions,
+                            trades_per_session=num_trades // num_sessions
+                        )
+                        
+                        # Update account value and trade history
+                        st.session_state.account_value = st.session_state.smart_trader.account_value
+                        st.session_state.trade_history.extend(st.session_state.smart_trader.trade_history[-num_trades:])
+                        
+                        # Show summary
+                        total_return = (st.session_state.account_value / starting_account - 1) * 100
+                        st.success(f"Simulation complete! Return: {total_return:+.2f}%")
+                    
+                    # Display pattern statistics
+                    if use_realistic_simulation:
+                        stats = st.session_state.realistic_smart_trader.patterns.get_stats()
+                    else:
+                        stats = st.session_state.smart_trader.patterns.get_stats()
+                        
+                    if stats["best_patterns"]:
+                        st.subheader("Top Trading Patterns")
+                        for i, pattern in enumerate(stats["best_patterns"], 1):
+                            key_parts = pattern['pattern'].split('_')
+                            if len(key_parts) >= 4:
+                                symbol, option_type, time_bucket, rsi_range = key_parts
+                                st.write(f"{i}. {symbol} {option_type.upper()} in {time_bucket} when {rsi_range}")
+                                st.write(f"   Win Rate: {pattern['win_rate']:.1%} ({pattern['total']} trades)")
+    
+    with col2:
+        st.subheader("Account Balance")
+        
+        # Create a list of account values from trade history
+        if st.session_state.trade_history:
+            try:
+                # Check if trade_history has the expected structure
+                if "previous_account" in st.session_state.trade_history[0]:
+                    account_values = [st.session_state.trade_history[0]["previous_account"]]
+                    account_values.extend([trade["new_account"] for trade in st.session_state.trade_history])
+                else:
+                    # If we don't have previous_account/new_account fields, estimate from profit/loss
+                    initial_value = st.session_state.account_value - sum([trade.get("net_profit", 0) for trade in st.session_state.trade_history])
+                    account_values = [initial_value]
+                    current_value = initial_value
+                    for trade in st.session_state.trade_history:
+                        current_value += trade.get("net_profit", 0)
+                        account_values.append(current_value)
+            
+                # Create a dataframe with trades and account values
+                account_df = pd.DataFrame({
+                    "Trade": range(len(account_values)),
+                    "Account Value": account_values
+                })
+                
+                # Plot the account value over time
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=account_df["Trade"], 
+                    y=account_df["Account Value"],
+                    mode='lines+markers',
+                    name='Account Value',
+                    line=dict(color='blue', width=2)
+                ))
+                
+                fig.update_layout(
+                    title='Account Value Over Time',
+                    xaxis_title='Trade Number',
+                    yaxis_title='Account Value ($)',
+                    template='plotly_white',
+                    height=400
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Add a separate continuous history chart
+                if len(st.session_state.account_history) > 1:
+                    st.subheader("Continuous Account History")
+                    st.write("This chart shows your account balance over time, including manual resets.")
+                    
+                    # Create a dataframe for continuous history
+                    history_df = pd.DataFrame(st.session_state.account_history)
+                    
+                    # Plot continuous history
+                    fig2 = go.Figure()
+                    
+                    # Add vertical lines for resets
+                    resets = history_df[history_df['label'] == 'Manual Reset']
+                    for idx, reset in resets.iterrows():
+                        fig2.add_vline(
+                            x=idx, 
+                            line_dash="dash", 
+                            line_color="red",
+                            annotation_text="Reset",
+                            annotation_position="top right"
+                        )
+                    
+                    # Add the main line
+                    fig2.add_trace(go.Scatter(
+                        x=range(len(history_df)),
+                        y=history_df["value"],
+                        mode='lines+markers',
+                        name='Account Value',
+                        line=dict(color='green', width=2),
+                        hovertext=history_df["label"],
+                        hoverinfo="text+y"
+                    ))
+                    
+                    # Highlight manual resets
+                    fig2.add_trace(go.Scatter(
+                        x=resets.index,
+                        y=resets["value"],
+                        mode='markers',
+                        name='Account Reset',
+                        marker=dict(color='red', size=10, symbol='star'),
+                        hovertext=resets["label"],
+                        hoverinfo="text+y"
+                    ))
+                    
+                    fig2.update_layout(
+                        title='Continuous Account History (Including Resets)',
+                        xaxis_title='Event Sequence',
+                        yaxis_title='Account Value ($)',
+                        template='plotly_white',
+                        height=400,
+                        showlegend=True
+                    )
+                    
+                    st.plotly_chart(fig2, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not generate account value chart. Error: {str(e)}")
+                st.write("You may need to run some trades first to populate trade history with the correct data structure.")
+
+# Performance Tab
+with tab3:
+    st.header("Performance Analytics")
+    
+    if not st.session_state.trade_history:
+        st.info("No trades to analyze yet. Run some simulations first.")
+    else:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Trade Statistics")
+            
+            # Calculate trade stats
+            trades_df = pd.DataFrame(st.session_state.trade_history)
+            win_trades = trades_df[trades_df["net_profit"] > 0]
+            loss_trades = trades_df[trades_df["net_profit"] <= 0]
+            
+            win_rate = len(win_trades) / len(trades_df) if len(trades_df) > 0 else 0
+            avg_win = win_trades["net_profit"].mean() if len(win_trades) > 0 else 0
+            avg_loss = loss_trades["net_profit"].mean() if len(loss_trades) > 0 else 0
+            profit_factor = abs(win_trades["net_profit"].sum() / loss_trades["net_profit"].sum()) if len(loss_trades) > 0 and loss_trades["net_profit"].sum() != 0 else float('inf')
+            
+            # Create metrics
+            metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
+            metrics_col1.metric("Win Rate", f"{win_rate:.1%}")
+            metrics_col2.metric("Avg Win", f"${avg_win:.2f}")
+            metrics_col3.metric("Avg Loss", f"${avg_loss:.2f}")
+            
+            metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
+            metrics_col1.metric("Profit Factor", f"{profit_factor:.2f}")
+            total_profit = trades_df["net_profit"].sum()
+            metrics_col2.metric("Total Profit", f"${total_profit:.2f}")
+            metrics_col3.metric("Total Trades", f"{len(trades_df)}")
+            
+            # Average hold time
+            avg_hold_time = trades_df["hold_time_minutes"].mean()
+            st.metric("Avg Hold Time", f"{avg_hold_time:.1f} minutes")
+            
+            # Calculate drawdown
+            account_series = [trades_df.iloc[0]["previous_account"]]
+            for _, trade in trades_df.iterrows():
+                account_series.append(trade["new_account"])
+            
+            account_peaks = pd.Series(account_series).cummax()
+            drawdowns = (pd.Series(account_series) / account_peaks - 1) * 100
+            max_drawdown = abs(drawdowns.min())
+            
+            st.metric("Max Drawdown", f"{max_drawdown:.2f}%")
+            
+            # Add realistic simulation metrics if available
+            if any("total_slippage" in trade for trade in st.session_state.trade_history):
+                st.subheader("Realistic Trading Metrics")
+                
+                # Calculate metrics
+                realistic_trades = [t for t in st.session_state.trade_history if "total_slippage" in t]
+                total_slippage = sum(t["total_slippage"] for t in realistic_trades)
+                total_commission = sum(t["total_commission"] for t in realistic_trades)
+                filled_trades = [t for t in realistic_trades if t.get("filled", True)]
+                unfilled_trades = [t for t in realistic_trades if not t.get("filled", True)]
+                partial_fills = sum(1 for t in filled_trades if t.get("partial_fill", False))
+                
+                # Create metrics display
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Slippage Cost", f"${total_slippage:.2f}")
+                    st.metric("Fill Rate", f"{len(filled_trades)/(len(filled_trades) + len(unfilled_trades)):.1%}")
+                with col2:
+                    st.metric("Total Commission", f"${total_commission:.2f}")
+                    st.metric("Partial Fills", f"{partial_fills} ({partial_fills/len(filled_trades):.1%})" if filled_trades else "0 (0%)")
+                with col3:
+                    st.metric("Avg Cost Per Contract", f"${(total_slippage + total_commission)/sum(t['position_size'] for t in filled_trades):.2f}" if filled_trades else "$0.00")
+                    st.metric("Unfilled Orders", f"{len(unfilled_trades)}")
+                
+                # Impact analysis
+                if filled_trades:
+                    gross_profit = sum(t["gross_profit"] for t in filled_trades)
+                    net_profit = sum(t["net_profit"] for t in filled_trades)
+                    cost_impact_pct = (gross_profit - net_profit) / gross_profit * 100 if gross_profit > 0 else 0
+                    
+                    st.write(f"📊 **Impact Analysis:** Trading costs reduce profit by {cost_impact_pct:.1f}% ({gross_profit-net_profit:.2f})")
+                    
+                    # Order type analysis
+                    limit_trades = [t for t in filled_trades if t.get("order_type") == "limit"]
+                    market_trades = [t for t in filled_trades if t.get("order_type") == "market"]
+                    
+                    if limit_trades and market_trades:
+                        limit_profit = sum(t["net_profit"] for t in limit_trades) / len(limit_trades)
+                        market_profit = sum(t["net_profit"] for t in market_trades) / len(market_trades)
+                        
+                        st.write(f"📈 **Order Type Analysis:** Limit orders avg profit: ${limit_profit:.2f} | Market orders avg profit: ${market_profit:.2f}")
+        
+        with col2:
+            st.subheader("Trade Distribution")
+            
+            # Create a histogram of profit/loss
+            fig = go.Figure()
+            fig.add_trace(go.Histogram(
+                x=trades_df["net_profit"],
+                name='P&L Distribution',
+                marker_color='blue',
+                opacity=0.7,
+                nbinsx=20
+            ))
+            
+            fig.update_layout(
+                title='Profit/Loss Distribution',
+                xaxis_title='P&L ($)',
+                yaxis_title='Frequency',
+                template='plotly_white',
+                height=300
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Add a pie chart of win/loss ratio
+            fig = go.Figure()
+            fig.add_trace(go.Pie(
+                labels=['Wins', 'Losses'],
+                values=[len(win_trades), len(loss_trades)],
+                marker_colors=['green', 'red'],
+                hole=0.4
+            ))
+            
+            fig.update_layout(
+                title='Win/Loss Ratio',
+                template='plotly_white',
+                height=300
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Show detailed trade history in a table
+        st.subheader("Trade History")
+        
+        # Create a more readable dataframe for display
+        display_df = trades_df[["symbol", "option_type", "strike", "price_change_pct", "net_profit", "outcome_type", "hold_time_minutes"]].copy()
+        display_df["option_type"] = display_df["option_type"].str.upper()
+        display_df["strike"] = display_df["strike"].map("${:.1f}".format)
+        display_df["price_change_pct"] = display_df["price_change_pct"].map("{:+.1f}%".format)
+        display_df["net_profit"] = display_df["net_profit"].map("${:.2f}".format)
+        
+        display_df = display_df.rename(columns={
+            "symbol": "Symbol",
+            "option_type": "Type",
+            "strike": "Strike",
+            "price_change_pct": "Change %",
+            "net_profit": "P&L",
+            "outcome_type": "Outcome",
+            "hold_time_minutes": "Hold Time (min)"
+        })
+        
+        st.dataframe(display_df, height=400)
+
+# Learning System Tab
+with tab4:
+    st.header("Learning System")
+    
+    if trading_system != "Smart Trader (ML)":
+        st.info("Switch to Smart Trader (ML) in the sidebar to use the learning system.")
+    else:
+        # Add data source indicator at the top of the learning system
+        data_source_container = st.container()
+        with data_source_container:
+            st.write(f"### Currently Learning From: {data_source} Market Data")
+            
+            # Show prominent reset button if learning with wrong data
+            if os.environ.get("TRADING_DATA_SOURCE") != data_source:
+                st.error(f"⚠️ Warning: Learning system is using patterns from a different data source than currently selected. Please reset learning data.")
+                if st.button("Reset Learning Data Now", type="primary"):
+                    try:
+                        from reset_learning_data import reset_learning_data
+                        reset_learning_data(data_source)
+                        st.session_state.smart_trader = SmartTrader(account_value=st.session_state.account_value)
+                        st.session_state.realistic_smart_trader = RealisticSmartTrader(account_value=st.session_state.account_value)
+                        st.success(f"✅ Learning data reset successfully for {data_source}.")
+                        st.experimental_rerun()  # Refresh the page
+                    except Exception as e:
+                        st.error(f"❌ Error resetting learning data: {str(e)}")
+            else:
+                st.success(f"✅ Learning system is correctly using {data_source} data.")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Pattern Performance")
+            
+            if use_realistic_simulation:
+                stats = st.session_state.realistic_smart_trader.patterns.get_stats()
+            else:
+                stats = st.session_state.smart_trader.patterns.get_stats()
+            
+            # Display overall statistics
+            st.write(f"Total patterns discovered: **{stats['total_patterns']}**")
+            st.write(f"Total trades analyzed: **{stats['total_trades']}**")
+            st.write(f"Overall win rate: **{stats['overall_win_rate']:.1%}**")
+            
+            # Display best patterns in a table
+            if stats["best_patterns"]:
+                st.subheader("Top Performing Patterns")
+                
+                patterns_data = []
+                for pattern in stats["best_patterns"]:
+                    key_parts = pattern['pattern'].split('_')
+                    if len(key_parts) >= 4:
+                        symbol, option_type, time_bucket, rsi_range = key_parts
+                        patterns_data.append({
+                            "Pattern": f"{symbol} {option_type.upper()} in {time_bucket} when {rsi_range}",
+                            "Win Rate": f"{pattern['win_rate']:.1%}",
+                            "Trades": pattern['total']
+                        })
+                
+                patterns_df = pd.DataFrame(patterns_data)
+                st.table(patterns_df)
+        
+        with col2:
+            st.subheader("Learning Progress")
+            
+            # Create inputs for learning simulation
+            st.write("Run additional learning sessions to improve pattern recognition:")
+            learning_sessions = st.slider("Learning Sessions", 1, 10, 3, 1)
+            trades_per_session = st.slider("Trades per Session", 5, 30, 10, 5)
+            
+            # Add a tracking option for the learning curve
+            track_equity = st.checkbox("Track Equity Curve During Training", value=True)
+            
+            if st.button("Train System"):
+                with st.spinner("Training trading system..."):
+                    # Run multiple training sessions
+                    starting_account = st.session_state.account_value
+                    
+                    progress_bar = st.progress(0)
+                    
+                    if use_realistic_simulation:
+                        trader = st.session_state.realistic_smart_trader
+                    else:
+                        trader = st.session_state.smart_trader
+                        
+                    trader.account_value = starting_account
+                    
+                    # Initialize equity tracking
+                    equity_points = [starting_account]
+                    equity_labels = ["Start"]
+                    win_rates = [stats["overall_win_rate"]]
+                    pattern_counts = [stats["total_patterns"]]
+                    
+                    # Record balances after each session
+                    for i in range(learning_sessions):
+                        if use_realistic_simulation:
+                            # Create a container to hold session results
+                            session_container = st.empty()
+                            
+                            # Run training session
+                            trader.run_trading_session(
+                                max_trades=trades_per_session,
+                                use_realistic=True,
+                                order_type=order_type,
+                                price_point=price_point if order_type == "limit" else "ask"
+                            )
+                            
+                            # Record equity point
+                            equity_points.append(trader.account_value)
+                            equity_labels.append(f"Session {i+1}")
+                            
+                            # Get updated stats
+                            updated_stats = trader.patterns.get_stats()
+                            win_rates.append(updated_stats["overall_win_rate"])
+                            pattern_counts.append(updated_stats["total_patterns"])
+                            
+                            # Update progress
+                            progress_bar.progress((i + 1) / learning_sessions)
+                            
+                            # Show real-time equity curve if tracking is enabled
+                            if track_equity:
+                                # Create equity curve
+                                fig = go.Figure()
+                                fig.add_trace(go.Scatter(
+                                    x=equity_labels, 
+                                    y=equity_points,
+                                    mode='lines+markers',
+                                    name='Account Value',
+                                    line=dict(color='green', width=2)
+                                ))
+                                
+                                fig.update_layout(
+                                    title='Learning Progress - Equity Curve',
+                                    xaxis_title='Training Session',
+                                    yaxis_title='Account Value ($)',
+                                    template='plotly_white',
+                                    height=300
+                                )
+                                
+                                # Display in the container
+                                with session_container.container():
+                                    st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            trader.run_trading_session(max_trades=trades_per_session)
+                            progress_bar.progress((i + 1) / learning_sessions)
+                            
+                            # Still track equity for standard trader
+                            equity_points.append(trader.account_value)
+                            equity_labels.append(f"Session {i+1}")
+                    
+                    # Update account value
+                    st.session_state.account_value = trader.account_value
+                    
+                    # Show summary
+                    total_return = (st.session_state.account_value / starting_account - 1) * 100
+                    st.success(f"Training complete! Return: {total_return:+.2f}%")
+                    
+                    # Update stats
+                    stats = trader.patterns.get_stats()
+                    st.write(f"New overall win rate: **{stats['overall_win_rate']:.1%}**")
+                    st.write(f"Total patterns: **{stats['total_patterns']}**")
+                    st.write(f"Total trades analyzed: **{stats['total_trades']}**")
+                    
+                    # Display final equity curve
+                    if track_equity:
+                        st.subheader("Training Equity Curve")
+                        
+                        # Create the final equity curve
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(
+                            x=equity_labels, 
+                            y=equity_points,
+                            mode='lines+markers',
+                            name='Account Value',
+                            line=dict(color='green', width=2)
+                        ))
+                        
+                        fig.update_layout(
+                            title='Learning Progress - Account Equity',
+                            xaxis_title='Training Session',
+                            yaxis_title='Account Value ($)',
+                            template='plotly_white',
+                            height=400
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Add a second chart showing win rate improvement
+                        fig2 = go.Figure()
+                        fig2.add_trace(go.Scatter(
+                            x=equity_labels, 
+                            y=[rate * 100 for rate in win_rates],
+                            mode='lines+markers',
+                            name='Win Rate',
+                            line=dict(color='blue', width=2)
+                        ))
+                        
+                        fig2.update_layout(
+                            title='Learning Progress - Win Rate Improvement',
+                            xaxis_title='Training Session',
+                            yaxis_title='Win Rate (%)',
+                            template='plotly_white',
+                            height=300
+                        )
+                        
+                        st.plotly_chart(fig2, use_container_width=True)
+            
+            # Add a visualization of learning improvement
+            if 'realistic_smart_trader' in st.session_state and st.session_state.realistic_smart_trader.patterns.loaded:
+                st.subheader("Pattern Recognition Visualization")
+                
+                # Get the current stats
+                current_stats = st.session_state.realistic_smart_trader.patterns.get_stats()
+                
+                # Create a visual representation of the pattern distribution
+                if current_stats["total_patterns"] > 0:
+                    # Count patterns by category
+                    pattern_categories = {
+                        "morning": 0,
+                        "midday": 0,
+                        "afternoon": 0,
+                        "oversold": 0,
+                        "neutral": 0,
+                        "overbought": 0,
+                        "call": 0,
+                        "put": 0
+                    }
+                    
+                    # Iterate through patterns to categorize them
+                    for pattern_key in st.session_state.realistic_smart_trader.patterns.patterns:
+                        parts = pattern_key.split('_')
+                        if len(parts) >= 4:
+                            _, option_type, time_bucket, rsi_range = parts
+                            
+                            if option_type in pattern_categories:
+                                pattern_categories[option_type] += 1
+                            
+                            if time_bucket in pattern_categories:
+                                pattern_categories[time_bucket] += 1
+                                
+                            if rsi_range in pattern_categories:
+                                pattern_categories[rsi_range] += 1
+                    
+                    # Create bar chart of pattern distribution
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(
+                        x=list(pattern_categories.keys()),
+                        y=list(pattern_categories.values()),
+                        marker_color=['blue', 'blue', 'blue', 'green', 'gray', 'red', 'purple', 'orange']
+                    ))
+                    
+                    fig.update_layout(
+                        title='Pattern Distribution',
+                        xaxis_title='Pattern Category',
+                        yaxis_title='Count',
+                        template='plotly_white',
+                        height=300
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+
+# Footer
+st.markdown("---")
+st.markdown("© 2025 Options Day Trading Dashboard | Powered by Streamlit") 

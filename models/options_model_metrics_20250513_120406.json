@@ -1,0 +1,52 @@
+{
+  "evaluation": {
+    "accuracy": 0.3333333333333333,
+    "precision": 0.3333333333333333,
+    "recall": 0.14285714285714285,
+    "f1": 0.2,
+    "confusion_matrix": [
+      [
+        3,
+        2
+      ],
+      [
+        6,
+        1
+      ]
+    ]
+  },
+  "feature_importances": {
+    "importance": {
+      "gamma": 0.21916131913206982,
+      "vega": 0.10520098256519488,
+      "implied_volatility": 0.10179870290543197,
+      "days_to_expiry": 0.07392326477007066,
+      "underlying_price": 0.07280702868008009,
+      "strike": 0.06893597711653368,
+      "delta": 0.06698713959057102,
+      "relative_strike": 0.05942373686299935,
+      "moneyness": 0.05486479552013562,
+      "theta": 0.05407805376102136,
+      "bid_ask_spread": 0.05338179358058448,
+      "time_value": 0.04810483816446486,
+      "intrinsic_value": 0.021332367350842225,
+      "bid_ask_spread_percent": 0.0,
+      "option_type_C": 0.0,
+      "option_type_P": 0.0
+    }
+  },
+  "best_params": {
+    "class_weight": null,
+    "max_depth": null,
+    "min_samples_leaf": 4,
+    "min_samples_split": 10,
+    "n_estimators": 200
+  },
+  "cv_scores": [
+    0.4444444444444444,
+    0.5454545454545454,
+    0.5454545454545454,
+    0.5,
+    0.5714285714285714
+  ]
+}

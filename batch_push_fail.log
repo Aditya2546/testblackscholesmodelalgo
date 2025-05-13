@@ -1,0 +1,4 @@
+2025-05-13 14:54:40,712 - ERROR - Failed to get current branch: fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.
+Use '--' to separate paths from revisions, like this:
+'git <command> [<revision>...] -- [<file>...]'
+

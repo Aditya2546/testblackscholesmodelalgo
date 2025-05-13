@@ -1,0 +1,35 @@
+2025-05-13 13:08:31,030 - __main__ - INFO - Starting automated backtesting with args: Namespace(symbols=None, periods=10, trades=50, days=30, repeat=3)
+2025-05-13 13:08:31,030 - __main__ - INFO - Starting cycle 1/3
+2025-05-13 13:08:31,031 - __main__ - INFO - Initialized automated backtester for symbols: SPY, QQQ, AAPL, MSFT, NVDA, AMZN, TSLA, META
+2025-05-13 13:08:31,031 - __main__ - INFO - Starting full automated backtesting and ML training cycle
+2025-05-13 13:08:31,031 - __main__ - INFO - Step 1: Collecting historical data
+2025-05-13 13:08:31,031 - __main__ - INFO - Collecting historical data for 8 symbols over 30 days
+2025-05-13 13:09:15,750 - __main__ - INFO - Data collection completed for 8 symbols
+2025-05-13 13:09:15,750 - __main__ - INFO - Step 2: Preparing training data
+2025-05-13 13:09:15,751 - __main__ - INFO - Preparing training data from collected historical data
+2025-05-13 13:09:15,794 - __main__ - ERROR - Error preparing training data: Cannot save file into a non-existent directory: 'training_data/processed/training_data/processed'
+2025-05-13 13:09:15,794 - __main__ - ERROR - Data preparation failed. Aborting cycle.
+2025-05-13 13:09:15,794 - __main__ - WARNING - Cycle 1 completed but model accuracy not available
+2025-05-13 13:09:20,798 - __main__ - INFO - Starting cycle 2/3
+2025-05-13 13:09:20,799 - __main__ - INFO - Initialized automated backtester for symbols: SPY, QQQ, AAPL, MSFT, NVDA, AMZN, TSLA, META
+2025-05-13 13:09:20,799 - __main__ - INFO - Starting full automated backtesting and ML training cycle
+2025-05-13 13:09:20,799 - __main__ - INFO - Step 1: Collecting historical data
+2025-05-13 13:09:20,799 - __main__ - INFO - Collecting historical data for 8 symbols over 30 days
+2025-05-13 13:10:08,491 - __main__ - INFO - Data collection completed for 8 symbols
+2025-05-13 13:10:08,493 - __main__ - INFO - Step 2: Preparing training data
+2025-05-13 13:10:08,493 - __main__ - INFO - Preparing training data from collected historical data
+2025-05-13 13:10:08,536 - __main__ - ERROR - Error preparing training data: Cannot save file into a non-existent directory: 'training_data/processed/training_data/processed'
+2025-05-13 13:10:08,536 - __main__ - ERROR - Data preparation failed. Aborting cycle.
+2025-05-13 13:10:08,536 - __main__ - WARNING - Cycle 2 completed but model accuracy not available
+2025-05-13 13:10:13,541 - __main__ - INFO - Starting cycle 3/3
+2025-05-13 13:10:13,542 - __main__ - INFO - Initialized automated backtester for symbols: SPY, QQQ, AAPL, MSFT, NVDA, AMZN, TSLA, META
+2025-05-13 13:10:13,543 - __main__ - INFO - Starting full automated backtesting and ML training cycle
+2025-05-13 13:10:13,543 - __main__ - INFO - Step 1: Collecting historical data
+2025-05-13 13:10:13,543 - __main__ - INFO - Collecting historical data for 8 symbols over 30 days
+2025-05-13 13:10:58,934 - __main__ - INFO - Data collection completed for 8 symbols
+2025-05-13 13:10:58,935 - __main__ - INFO - Step 2: Preparing training data
+2025-05-13 13:10:58,936 - __main__ - INFO - Preparing training data from collected historical data
+2025-05-13 13:10:58,975 - __main__ - ERROR - Error preparing training data: Cannot save file into a non-existent directory: 'training_data/processed/training_data/processed'
+2025-05-13 13:10:58,975 - __main__ - ERROR - Data preparation failed. Aborting cycle.
+2025-05-13 13:10:58,975 - __main__ - WARNING - Cycle 3 completed but model accuracy not available
+2025-05-13 13:10:58,975 - __main__ - INFO - All automated backtesting cycles completed

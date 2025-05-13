@@ -1,0 +1,51 @@
+{
+  "evaluation": {
+    "accuracy": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "confusion_matrix": [
+      [
+        10,
+        0
+      ],
+      [
+        0,
+        8
+      ]
+    ]
+  },
+  "feature_importances": {
+    "importance": {
+      "delta": 0.3016715461973607,
+      "bid_ask_spread": 0.22158104043851887,
+      "theta": 0.08677395445077014,
+      "bid_ask_spread_percent": 0.07488758854605432,
+      "time_value": 0.06639262667408509,
+      "implied_volatility": 0.05156559247496592,
+      "vega": 0.03767913903789808,
+      "relative_strike": 0.035537423743507525,
+      "moneyness": 0.032608393512416345,
+      "option_type_C": 0.028618866125463768,
+      "strike": 0.024933275222597445,
+      "option_type_P": 0.02341090578915479,
+      "gamma": 0.013149095782996612,
+      "underlying_price": 0.0011905520042103039,
+      "days_to_expiry": 0.0
+    }
+  },
+  "best_params": {
+    "class_weight": "balanced",
+    "max_depth": null,
+    "min_samples_leaf": 1,
+    "min_samples_split": 2,
+    "n_estimators": 100
+  },
+  "cv_scores": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ]
+}
