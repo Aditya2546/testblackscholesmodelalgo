@@ -2,8 +2,8 @@
 """
 Market Data Manager
 
-This module provides a unified interface for market data access with automatic
-failover between different data sources.
+This module provides a unified interface for market data access with
+Alpaca as the data provider.
 """
 
 import logging
@@ -46,7 +46,7 @@ class MarketDataSource:
 
 class MarketDataManager:
     """
-    Manages multiple market data sources with automatic failover.
+    Manages market data source with error handling and retry logic.
     Provides a unified interface regardless of the underlying data source.
     """
     
@@ -126,7 +126,7 @@ class MarketDataManager:
     
     def _call_with_failover(self, method_name: str, *args, **kwargs) -> Any:
         """
-        Call a method with automatic failover if it fails.
+        Call a method with automatic retry if it fails.
         
         Args:
             method_name: Name of the method to call
@@ -198,245 +198,46 @@ class MarketDataManager:
         """Get historical price data"""
         return self._call_with_failover("get_historical_prices", symbol, start_date, end_date, timeframe)
     
-    def get_available_sources(self) -> List[str]:
-        """Get list of available data sources"""
-        return [type(source).__name__ for source in self.sources]
-    
     def get_active_source(self) -> str:
-        """Get name of currently active data source"""
-        return type(self.sources[self.current_source_index]).__name__
+        """Get the name of the currently active data source"""
+        if self.current_source_index < len(self.sources):
+            return self.sources[self.current_source_index].__class__.__name__
+        return "Unknown"
 
-
-# Example alternative data source implementation
-class YahooFinanceDataSource(MarketDataSource):
-    """Yahoo Finance data source implementation"""
+def get_market_data_manager():
+    """
+    Factory function to create a market data manager with Alpaca.
     
-    def __init__(self):
-        """Initialize Yahoo Finance data source"""
-        self.connected = False
-        try:
-            import yfinance as yf
-            self.yf = yf
-            self.connected = True
-            logger.info("Yahoo Finance data source initialized")
-        except ImportError:
-            logger.warning("yfinance package not available. Install with: pip install yfinance")
-            
-    def check_connection(self) -> bool:
-        """Check if connection to Yahoo Finance is working"""
-        if not self.connected:
-            return False
-            
-        try:
-            # Try to fetch a simple quote as a test
-            test = self.yf.Ticker("SPY").info
-            return "symbol" in test
-        except Exception as e:
-            logger.warning(f"Yahoo Finance connection check failed: {e}")
-            return False
-            
-    def get_price(self, symbol: str) -> float:
-        """Get current price for a symbol"""
-        if not self.connected:
-            raise Exception("Yahoo Finance data source not connected")
-            
-        ticker = self.yf.Ticker(symbol)
-        data = ticker.history(period="1d")
-        
-        if data.empty:
-            raise Exception(f"No price data found for {symbol}")
-            
-        return float(data["Close"].iloc[-1])
-        
-    def get_options_chain(self, symbol: str) -> Dict:
-        """Get options chain for a symbol"""
-        if not self.connected:
-            raise Exception("Yahoo Finance data source not connected")
-            
-        ticker = self.yf.Ticker(symbol)
-        expirations = ticker.options
-        
-        if not expirations:
-            raise Exception(f"No options data found for {symbol}")
-            
-        result = {}
-        
-        # Get current price
-        price = self.get_price(symbol)
-        
-        # Define near-the-money range (±10%)
-        min_strike = price * 0.9
-        max_strike = price * 1.1
-        
-        # Get options for each expiration
-        for expiry in expirations:
-            # Convert Yahoo date format to ISO
-            exp_date = datetime.strptime(expiry, "%Y-%m-%d").strftime("%Y-%m-%d")
-            
-            calls = ticker.option_chain(expiry).calls
-            puts = ticker.option_chain(expiry).puts
-            
-            # Filter for near-the-money options
-            calls = calls[(calls["strike"] >= min_strike) & (calls["strike"] <= max_strike)]
-            puts = puts[(puts["strike"] >= min_strike) & (puts["strike"] <= max_strike)]
-            
-            result[exp_date] = {
-                "calls": {},
-                "puts": {}
-            }
-            
-            # Format call options
-            for _, row in calls.iterrows():
-                strike = str(row["strike"])
-                result[exp_date]["calls"][strike] = {
-                    "bid": float(row["bid"]),
-                    "ask": float(row["ask"]),
-                    "last": float(row["lastPrice"]),
-                    "volume": int(row["volume"]) if not pd.isna(row["volume"]) else 0,
-                    "open_interest": int(row["openInterest"]) if not pd.isna(row["openInterest"]) else 0,
-                    "iv": float(row["impliedVolatility"]) * 100,  # Convert to percentage
-                    "delta": 0.5,  # Yahoo doesn't provide Greeks, using approximation
-                    "gamma": 0.01,
-                    "theta": -0.01,
-                    "vega": 0.1,
-                    "strike": float(row["strike"]),
-                    "underlying_price": price
-                }
-                
-            # Format put options
-            for _, row in puts.iterrows():
-                strike = str(row["strike"])
-                result[exp_date]["puts"][strike] = {
-                    "bid": float(row["bid"]),
-                    "ask": float(row["ask"]),
-                    "last": float(row["lastPrice"]),
-                    "volume": int(row["volume"]) if not pd.isna(row["volume"]) else 0,
-                    "open_interest": int(row["openInterest"]) if not pd.isna(row["openInterest"]) else 0,
-                    "iv": float(row["impliedVolatility"]) * 100,  # Convert to percentage
-                    "delta": -0.5,  # Yahoo doesn't provide Greeks, using approximation
-                    "gamma": 0.01,
-                    "theta": -0.01,
-                    "vega": 0.1,
-                    "strike": float(row["strike"]),
-                    "underlying_price": price
-                }
-                
-        return result
-        
-    def get_option_quote(self, symbol: str, expiration: str, strike: float, option_type: str) -> Dict:
-        """Get quote for a specific option contract"""
-        if not self.connected:
-            raise Exception("Yahoo Finance data source not connected")
-            
-        # Get the options chain
-        chain = self.get_options_chain(symbol)
-        
-        # Check if expiration exists
-        if expiration not in chain:
-            raise Exception(f"Expiration {expiration} not found for {symbol}")
-            
-        # Check option type
-        if option_type.lower() not in ["call", "put"]:
-            raise Exception(f"Invalid option type: {option_type}")
-            
-        # Get calls or puts
-        option_dict = chain[expiration]["calls"] if option_type.lower() == "call" else chain[expiration]["puts"]
-        
-        # Convert strike to string for lookup
-        strike_str = str(strike)
-        
-        # Check if strike exists
-        if strike_str not in option_dict:
-            raise Exception(f"Strike {strike} not found for {symbol} {expiration} {option_type}")
-            
-        return option_dict[strike_str]
-        
-    def get_historical_prices(self, symbol: str, start_date: str, end_date: str, timeframe: str = "1D") -> Dict:
-        """Get historical price data"""
-        if not self.connected:
-            raise Exception("Yahoo Finance data source not connected")
-            
-        # Convert timeframe to Yahoo format
-        timeframe_map = {
-            "1D": "1d",
-            "1H": "1h",
-            "5m": "5m",
-            "1m": "1m"
-        }
-        
-        period = timeframe_map.get(timeframe, "1d")
-        
-        # Get historical data
-        ticker = self.yf.Ticker(symbol)
-        data = ticker.history(start=start_date, end=end_date, interval=period)
-        
-        if data.empty:
-            raise Exception(f"No historical data found for {symbol}")
-            
-        # Convert to desired format
-        result = {
-            "symbol": symbol,
-            "data": []
-        }
-        
-        for idx, row in data.iterrows():
-            result["data"].append({
-                "timestamp": idx.strftime("%Y-%m-%d %H:%M:%S"),
-                "open": float(row["Open"]),
-                "high": float(row["High"]),
-                "low": float(row["Low"]),
-                "close": float(row["Close"]),
-                "volume": int(row["Volume"])
-            })
-            
-        return result
-
-
-# Example usage
-if __name__ == "__main__":
-    import pandas as pd
-    
-    # Create market data manager with Alpaca as primary and Yahoo as backup
+    Returns:
+        MarketDataManager instance
+    """
+    # Initialize Alpaca data source
     try:
-        # Try to import Alpaca credentials
-        from alpaca_config import API_KEY, API_SECRET
-        alpaca = AlpacaMarketData(API_KEY, API_SECRET)
-        
-        # Initialize Yahoo Finance if available
-        yahoo = None
-        try:
-            yahoo = YahooFinanceDataSource()
-        except:
-            logger.warning("Yahoo Finance data source not available")
-            
-        # Create manager with available sources
-        data_sources = [source for source in [alpaca, yahoo] if source is not None]
-        manager = MarketDataManager(primary_source=alpaca, backup_sources=data_sources[1:] if len(data_sources) > 1 else None)
-        
-        # Test the manager
-        symbols = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
-        
-        print("Testing Market Data Manager...")
-        print(f"Available sources: {manager.get_available_sources()}")
-        print(f"Active source: {manager.get_active_source()}")
-        
-        for symbol in symbols:
-            try:
-                price = manager.get_price(symbol)
-                print(f"{symbol} price: ${price:.2f}")
-            except Exception as e:
-                print(f"Error getting price for {symbol}: {e}")
-                
-        # Test options data for AAPL
-        try:
-            options = manager.get_options_chain("AAPL")
-            print("\nAAPL Options Chain:")
-            for expiry, chain in options.items():
-                calls_count = len(chain["calls"])
-                puts_count = len(chain["puts"])
-                print(f"  {expiry}: {calls_count} calls, {puts_count} puts")
-        except Exception as e:
-            print(f"Error getting options chain: {e}")
-            
+        logger.info("Initializing Alpaca market data source")
+        alpaca = AlpacaMarketData()
     except Exception as e:
-        print(f"Error initializing Market Data Manager: {e}") 
+        logger.error(f"Failed to initialize Alpaca market data source: {e}")
+        alpaca = None
+    
+    # Add available data sources to the list
+    data_sources = [source for source in [alpaca] if source is not None]
+    
+    if not data_sources:
+        raise Exception("No market data sources available")
+    
+    # Create market data manager with available sources
+    return MarketDataManager(data_sources[0], data_sources[1:] if len(data_sources) > 1 else [])
+
+if __name__ == "__main__":
+    # Test the market data manager
+    manager = get_market_data_manager()
+    print(f"Active data source: {manager.get_active_source()}")
+    
+    # Test basic functionality
+    symbols = ["SPY", "AAPL", "MSFT"]
+    for symbol in symbols:
+        try:
+            price = manager.get_price(symbol)
+            print(f"{symbol} price: ${price:.2f}")
+        except Exception as e:
+            print(f"Error getting price for {symbol}: {e}") 

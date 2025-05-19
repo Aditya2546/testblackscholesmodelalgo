@@ -16,6 +16,7 @@ import base64
 from typing import Dict, List, Tuple, Optional
 import json
 import math
+import fix_alpaca_options  # This automatically applies all fixes
 
 class AlpacaMarketData:
     """
@@ -36,21 +37,16 @@ class AlpacaMarketData:
         self.api_secret = api_secret or os.environ.get("ALPACA_API_SECRET")
         self.base_url = base_url or os.environ.get("ALPACA_API_BASE_URL", "https://api.alpaca.markets/v2")
         
-        # Market Data API endpoint - correct URL according to documentation
+        # Market Data API endpoints
         self.data_url = "https://data.alpaca.markets/v2"
-        self.options_base_url = "https://data.alpaca.markets/v2"
+        self.data_beta_url = "https://data.alpaca.markets/v1beta1"
         self.options_contracts_url = "https://api.alpaca.markets/v2/options/contracts"
         
-        # Standard Alpaca Trading API authentication headers
+        # Standard Alpaca API authentication headers
         self.headers = {
             "APCA-API-KEY-ID": self.api_key,
-            "APCA-API-SECRET-KEY": self.api_secret
-        }
-        
-        # Set up options API headers with API key auth - this is the preferred method for newer endpoints
-        self.options_headers = {
-            "APCA-API-KEY-ID": self.api_key,
-            "APCA-API-SECRET-KEY": self.api_secret
+            "APCA-API-SECRET-KEY": self.api_secret,
+            "Accept": "application/json"
         }
         
         # Cache for price data to reduce API calls
@@ -88,10 +84,12 @@ class AlpacaMarketData:
         
         # If not in cache or expired, fetch from API
         try:
-            # Try to get the latest trade first since this appears to work on all subscription levels
+            # Try to get the latest trade first
+            params = {}  # Empty params dict, no verify parameter
             response = requests.get(
-                f"https://data.alpaca.markets/v2/stocks/{symbol}/trades/latest",
-                headers=self.headers
+                f"{self.data_url}/stocks/{symbol}/trades/latest",
+                headers=self.headers,
+                params=params
             )
             
             if response.status_code == 200 and 'trade' in response.json():
@@ -106,8 +104,9 @@ class AlpacaMarketData:
             else:
                 # Fall back to quotes if trades don't work
                 response = requests.get(
-                    f"{self.base_url}/stocks/{symbol}/quotes/latest",
-                    headers=self.headers
+                    f"{self.data_url}/stocks/{symbol}/quotes/latest",
+                    headers=self.headers,
+                    params=params
                 )
                 
                 if response.status_code == 200:
@@ -144,15 +143,145 @@ class AlpacaMarketData:
             today = datetime.datetime.now().date()
             next_month = today + datetime.timedelta(days=30)
             
+            # Use the v1beta1 option chain endpoint (snapshots endpoint)
+            url = f"{self.data_beta_url}/options/snapshots/{symbol}"
+            
+            print(f"  Requesting options chain for {symbol} from URL: {url}")
+            
+            # Make the request with no feed parameter (fix_alpaca_options should handle this)
+            response = requests.get(url, headers=self.headers)
+            
+            if response.status_code != 200:
+                print(f"Error fetching options chain: {response.status_code} - {response.text}")
+                # Try the contracts endpoint as a fallback
+                return self._get_options_chain_from_contracts(symbol, today, next_month)
+            
+            # Process the v1beta1 options snapshots response
+            snapshots_data = response.json()
+            
+            # Check for next_page_token and handle gracefully if present
+            if 'next_page_token' in snapshots_data:
+                # Don't try to parse the token as int, just log that we've found it
+                # The token is a base64 encoded string and not meant to be parsed as an integer
+                print(f"Found next_page_token in response: {snapshots_data['next_page_token'][:5]}...")
+                
+            # Check if we have snapshot data
+            if 'snapshots' in snapshots_data:
+                snapshots_data = snapshots_data['snapshots']
+            elif not snapshots_data:
+                print(f"No options snapshots data found for {symbol}")
+                # Try the contracts endpoint as a fallback
+                return self._get_options_chain_from_contracts(symbol, today, next_month)
+            
+            # Organize by expiration date
+            options_chain = {}
+            
+            # Get the current price for the underlying
+            current_price = self.get_price(symbol)
+            
+            # Process each contract in snapshots
+            for contract_symbol, snapshot in snapshots_data.items():
+                # Extract contract details from the symbol (e.g., AAPL250517C00190000)
+                # Format: Symbol + Expiration (YYMMDD) + Type (C/P) + Strike (8 digits with leading zeros)
+                try:
+                    # Parse option symbol to get expiration, type, and strike
+                    if len(contract_symbol) >= 15:  # Basic validation
+                        exp_yymmdd = contract_symbol[-15:-9]  # Extract date portion YYMMDD
+                        option_type = contract_symbol[-9:-8].lower()  # Extract C or P
+                        strike_str = contract_symbol[-8:]  # Extract strike with padding
+                        
+                        # Convert to standard format
+                        year = int("20" + exp_yymmdd[0:2])
+                        month = int(exp_yymmdd[2:4])
+                        day = int(exp_yymmdd[4:6])
+                        
+                        # Create expiration date in YYYY-MM-DD format
+                        exp_date = f"{year}-{month:02d}-{day:02d}"
+                        
+                        # Convert strike to float (remove padding and divide by 1000)
+                        strike = float(strike_str) / 1000
+                        
+                        # Skip if expiration is more than a month away or if no valid data
+                        exp_datetime = datetime.datetime.strptime(exp_date, "%Y-%m-%d").date()
+                        if exp_datetime > next_month:
+                            continue
+                            
+                        # Initialize chain structure for this expiration if not exists
+                        if exp_date not in options_chain:
+                            options_chain[exp_date] = {
+                                "calls": {},
+                                "puts": {}
+                            }
+                        
+                        # Get quote data
+                        quote_data = snapshot.get('quote', {})
+                        trade_data = snapshot.get('trade', {})
+                        greeks_data = snapshot.get('greeks', {})
+                        
+                        # Skip if no quote data
+                        if not quote_data:
+                            continue
+                        
+                        # Prepare contract data
+                        contract_data = {
+                            "symbol": contract_symbol,
+                            "bid": quote_data.get('bp', 0),
+                            "ask": quote_data.get('ap', 0),
+                            "last": trade_data.get('p', 0) if trade_data else (quote_data.get('bp', 0) + quote_data.get('ap', 0)) / 2,
+                            "volume": trade_data.get('s', 0) if trade_data else 0,
+                            "open_interest": 0,  # Not provided in the snapshot
+                            "iv": greeks_data.get('implied_volatility', 30.0),
+                            "delta": greeks_data.get('delta', 0.5 if option_type == 'c' else -0.5),
+                            "gamma": greeks_data.get('gamma', 0.01),
+                            "theta": greeks_data.get('theta', -0.01),
+                            "vega": greeks_data.get('vega', 0.1),
+                            "rho": greeks_data.get('rho', 0.01),
+                            "strike": strike,
+                            "underlying_price": current_price
+                        }
+                        
+                        # Add to the appropriate section (calls or puts)
+                        if option_type == 'c':
+                            options_chain[exp_date]["calls"][str(strike)] = contract_data
+                        elif option_type == 'p':
+                            options_chain[exp_date]["puts"][str(strike)] = contract_data
+                except Exception as e:
+                    print(f"Error processing contract {contract_symbol}: {e}")
+                    continue
+            
+            # If we got a valid options chain, return it
+            if options_chain and any(len(chain["calls"]) > 0 or len(chain["puts"]) > 0 for chain in options_chain.values()):
+                return options_chain
+            
+            # If we didn't get valid data, try the contracts endpoint
+            return self._get_options_chain_from_contracts(symbol, today, next_month)
+                
+        except Exception as e:
+            print(f"Error processing contract next_page_token: {e}")
+            # Try the contracts endpoint as a fallback
+            return self._get_options_chain_from_contracts(symbol, today, next_month)
+    
+    def _get_options_chain_from_contracts(self, symbol: str, start_date, end_date) -> Dict:
+        """
+        Alternative method to get options chain using the contracts endpoint.
+        
+        Args:
+            symbol: Stock symbol (e.g., 'AAPL')
+            start_date: Start date for expiration range
+            end_date: End date for expiration range
+            
+        Returns:
+            Dictionary with options chain data
+        """
+        try:
             # Format the options contracts URL with query parameters
-            # The correct endpoint is /v2/options/contracts according to the docs
             url = f"{self.options_contracts_url}"
             
             # Fetch options contracts for the symbol, for both calls and puts
             params = {
                 "underlying_symbols": symbol,
-                "expiration_date_gte": today.isoformat(),
-                "expiration_date_lte": next_month.isoformat(),
+                "expiration_date_gte": start_date.isoformat(),
+                "expiration_date_lte": end_date.isoformat(),
                 "limit": 100  # Max limit to get a good sample of contracts
             }
             
@@ -185,11 +314,10 @@ class AlpacaMarketData:
             for contract in contract_data['option_contracts']:
                 # Get expiration date
                 exp_date = contract['expiration_date']
-                exp_key = exp_date
                 
                 # Initialize chain structure for this expiration if not exists
-                if exp_key not in options_chain:
-                    options_chain[exp_key] = {
+                if exp_date not in options_chain:
+                    options_chain[exp_date] = {
                         "calls": {},
                         "puts": {}
                     }
@@ -198,89 +326,183 @@ class AlpacaMarketData:
                 contract_type = contract['type'].lower()  # 'call' or 'put'
                 strike = float(contract['strike_price'])
                 contract_symbol = contract['symbol']
-                contract_id = contract['id']
                 
-                # Skip if strike price is too far from current price (±20%)
-                min_strike = current_price * 0.8
-                max_strike = current_price * 1.2
-                if not (min_strike <= strike <= max_strike):
-                    continue
-                
-                # Try to get market data for this contract (might not be available)
+                # We need to get actual quote and trade data for this contract
                 try:
-                    # Get the detailed contract data
-                    contract_response = requests.get(
-                        f"{self.options_contracts_url}/{contract_id}",
-                        headers=self.headers
+                    # Get snapshot for this contract
+                    snapshot_url = f"{self.data_beta_url}/options/snapshots"
+                    snapshot_params = {"symbols": contract_symbol}
+                    snapshot_response = requests.get(
+                        snapshot_url,
+                        headers=self.headers,
+                        params=snapshot_params
                     )
                     
-                    if contract_response.status_code != 200:
-                        continue
-                    
-                    detailed_contract = contract_response.json()
-                    
-                    # Create basic contract data with available information
-                    contract_data = {
-                        "bid": 0,  # Will try to get from market data
-                        "ask": 0,  # Will try to get from market data
-                        "last": 0,  # Will try to get from market data
-                        "volume": 0,
-                        "open_interest": int(detailed_contract.get('open_interest', 0)),
-                        "iv": 30.0,  # Default IV %
-                        "delta": 0.5 if contract_type == 'call' else -0.5,  # Default delta
-                        "gamma": 0.01,  # Default gamma
-                        "theta": -0.01,  # Default theta
-                        "vega": 0.1    # Default vega
-                    }
-                    
-                    # Try to get real-time market data from stock options endpoint if available
-                    try:
-                        market_data_response = requests.get(
-                            f"{self.options_base_url}/stocks/options/{contract_symbol}/snapshot",
-                            headers=self.headers
-                        )
+                    if snapshot_response.status_code != 200:
+                        # Use default values if we can't get snapshot data
+                        contract_data = {
+                            "symbol": contract_symbol,
+                            "bid": 0,
+                            "ask": 0,
+                            "last": 0,
+                            "volume": 0,
+                            "open_interest": 0,
+                            "iv": 30.0,  # Default IV
+                            "delta": 0.5 if contract_type == 'call' else -0.5,
+                            "gamma": 0.01,
+                            "theta": -0.01,
+                            "vega": 0.1,
+                            "rho": 0.01,
+                            "strike": strike,
+                            "underlying_price": current_price
+                        }
+                    else:
+                        snapshot_data = snapshot_response.json()
+                        contract_snapshot = snapshot_data.get(contract_symbol, {})
                         
-                        if market_data_response.status_code == 200:
-                            market_data = market_data_response.json()
-                            if 'snapshot' in market_data:
-                                snapshot = market_data['snapshot']
-                                
-                                # Update with real market data
-                                contract_data.update({
-                                    "bid": snapshot.get('bid_price', 0),
-                                    "ask": snapshot.get('ask_price', 0),
-                                    "last": snapshot.get('last_price', 0),
-                                    "volume": snapshot.get('volume', 0),
-                                    "iv": snapshot.get('implied_volatility', 0.3) * 100,  # Convert to percentage
-                                    "delta": snapshot.get('delta', contract_data['delta']),
-                                    "gamma": snapshot.get('gamma', contract_data['gamma']),
-                                    "theta": snapshot.get('theta', contract_data['theta']),
-                                    "vega": snapshot.get('vega', contract_data['vega'])
-                                })
-                    except Exception as e:
-                        # If market data isn't available, we'll use the basic info
-                        print(f"Couldn't get market data for {contract_symbol}: {e}")
+                        # Get quote and trade data
+                        quote_data = contract_snapshot.get('quote', {})
+                        trade_data = contract_snapshot.get('trade', {})
+                        greeks_data = contract_snapshot.get('greeks', {})
                         
-                        # Use some estimated values based on close price from contract data
-                        if detailed_contract.get('close_price'):
-                            price = float(detailed_contract.get('close_price', 0))
-                            contract_data.update({
-                                "bid": price * 0.98,  # Estimated bid (2% below last)
-                                "ask": price * 1.02,  # Estimated ask (2% above last)
-                                "last": price
-                            })
+                        contract_data = {
+                            "symbol": contract_symbol,
+                            "bid": quote_data.get('bp', 0),
+                            "ask": quote_data.get('ap', 0),
+                            "last": trade_data.get('p', 0) if trade_data else (quote_data.get('bp', 0) + quote_data.get('ap', 0)) / 2,
+                            "volume": trade_data.get('s', 0) if trade_data else 0,
+                            "open_interest": 0,  # Not provided in the snapshot
+                            "iv": greeks_data.get('implied_volatility', 30.0),
+                            "delta": greeks_data.get('delta', 0.5 if contract_type == 'call' else -0.5),
+                            "gamma": greeks_data.get('gamma', 0.01),
+                            "theta": greeks_data.get('theta', -0.01),
+                            "vega": greeks_data.get('vega', 0.1),
+                            "rho": greeks_data.get('rho', 0.01),
+                            "strike": strike,
+                            "underlying_price": current_price
+                        }
                     
-                    # Add to the chain
-                    options_chain[exp_key][contract_type + "s"][str(strike)] = contract_data
-                    
+                    # Add to the appropriate section (calls or puts)
+                    if contract_type == 'call':
+                        options_chain[exp_date]["calls"][str(strike)] = contract_data
+                    elif contract_type == 'put':
+                        options_chain[exp_date]["puts"][str(strike)] = contract_data
+                        
                 except Exception as e:
-                    print(f"Error processing contract {contract_symbol}: {e}")
+                    print(f"Error getting snapshot for {contract_symbol}: {e}")
+                    continue
             
             return options_chain
+                
+        except Exception as e:
+            print(f"Exception in _get_options_chain_from_contracts for {symbol}: {e}")
+            return {}
+    
+    def get_historical_prices(self, symbol: str, start_date: str, end_date: str, timeframe: str = "1Day") -> Dict:
+        """
+        Get historical price data for a symbol.
+        
+        Args:
+            symbol: Stock symbol (e.g., 'AAPL')
+            start_date: Start date (YYYY-MM-DD)
+            end_date: End date (YYYY-MM-DD)
+            timeframe: Time frame for the bars (e.g., '1Day', '1Hour', '5Min')
+            
+        Returns:
+            DataFrame with historical price data
+        """
+        try:
+            # Map timeframe format to match Alpaca's expected format
+            timeframe_map = {
+                "1D": "1Day",
+                "1Day": "1Day",
+                "1H": "1Hour",
+                "1Hour": "1Hour",
+                "5m": "5Min",
+                "5min": "5Min",
+                "5Min": "5Min",
+                "1m": "1Min",
+                "1min": "1Min",
+                "1Min": "1Min",
+            }
+            
+            # Use the provided timeframe or map it if needed
+            alpaca_timeframe = timeframe_map.get(timeframe, timeframe)
+            
+            # Format the URL for stock bars
+            url = f"{self.data_url}/stocks/bars"
+            
+            params = {
+                'symbols': symbol,
+                'timeframe': alpaca_timeframe,
+                'start': start_date,
+                'end': end_date,
+                'limit': 1000,
+                'adjustment': 'raw'
+            }
+            
+            print(f"Requesting historical prices for {symbol} from {start_date} to {end_date}")
+            print(f"URL: {url}")
+            print(f"Params: {params}")
+            
+            response = requests.get(url, headers=self.headers, params=params)
+            
+            if response.status_code != 200:
+                print(f"Error fetching historical prices: {response.status_code} - {response.text}")
+                return pd.DataFrame()
+            
+            data = response.json()
+            
+            if not data or 'bars' not in data or symbol not in data['bars']:
+                print(f"No historical data found for {symbol}")
+                return pd.DataFrame()
+            
+            # Convert to DataFrame
+            bars = data['bars'][symbol]
+            df = pd.DataFrame(bars)
+            
+            # Convert timestamp to datetime and set as index
+            if 't' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['t'])
+                df.set_index('timestamp', inplace=True)
+            
+            # Rename columns to match expected format
+            column_map = {
+                'o': 'open',
+                'h': 'high',
+                'l': 'low',
+                'c': 'close',
+                'v': 'volume'
+            }
+            df.rename(columns=column_map, inplace=True)
+            
+            # Ensure we have all required columns
+            required_columns = ['open', 'high', 'low', 'close', 'volume']
+            for col in required_columns:
+                if col not in df.columns:
+                    print(f"Warning: Missing column {col} in historical data")
+            
+            # Add missing columns if needed
+            if 'adjusted_close' not in df.columns and 'close' in df.columns:
+                df['adjusted_close'] = df['close']
+                
+            # Make column names match what the application expects
+            df.columns = [col.lower() for col in df.columns]
+            
+            # Make first letter uppercase to match what the simulator is expecting
+            final_columns = {}
+            for col in df.columns:
+                if col in ['open', 'high', 'low', 'close', 'volume']:
+                    final_columns[col] = col.capitalize()
+            
+            if final_columns:
+                df.rename(columns=final_columns, inplace=True)
+            
+            return df
             
         except Exception as e:
-            print(f"Exception while getting options chain for {symbol}: {e}")
-            return {}
+            print(f"Exception while getting historical prices for {symbol}: {e}")
+            return pd.DataFrame()
     
     def get_technical_indicators(self, symbol: str) -> Dict:
         """
@@ -438,7 +660,7 @@ class AlpacaMarketData:
             
             # Try to get market data (bid/ask) from the snapshot endpoint
             market_data_response = requests.get(
-                f"{self.options_base_url}/stocks/options/{contract_symbol}/snapshot",
+                f"https://data.alpaca.markets/v2/stocks/options/{contract_symbol}/snapshot",
                 headers=self.headers
             )
             
